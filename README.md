@@ -1,120 +1,128 @@
-# Secure Military Audit Log (MVP)
+# Secure Military Audit Log (Full MVP)
 
 ![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)
-![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED?style=flat&logo=docker)
-![Status](https://img.shields.io/badge/Status-Research%20MVP-orange)
+![Hyperledger Fabric](https://img.shields.io/badge/Hyperledger%20Fabric-2.5-black?style=flat&logo=hyperledger)
+![Status](https://img.shields.io/badge/Status-Research%20Prototype-success)
 
-A hybrid blockchain architecture implementation for secure, tamper-evident military audit logs. This project demonstrates how to combine **Off-chain Storage** (for large files) with **On-chain Integrity** (for immutable proofs) to ensure data non-repudiation in resource-constrained environments.
+A hybrid blockchain architecture implementation for secure, tamper-evident military audit logs. This project integrates **Hyperledger Fabric** (for immutable proofs) with **MinIO** (for secure off-chain storage) to solve the "Triangle Architecture" challenge in distributed logistics.
 
 ## 📖 Overview
 
-In military logistics and command chains, data integrity is paramount. However, storing large documents (orders, maps, supply logs) directly on a blockchain is inefficient and slow.
-
-This solution implements the **"Triangle Architecture"**:
-1.  **Storage**: The actual file is stored in a private, S3-compatible object storage (MinIO).
-2.  **Ledger**: Only the cryptographic hash (SHA-256) and metadata are written to the Blockchain.
-3.  **Index**: A SQL database links the file path to the blockchain transaction ID for fast retrieval.
+This system provides a **non-repudiation mechanism** for military orders and supply logs.
+1.  **Off-chain**: Large files (PDFs, maps) are stored in MinIO (S3-compatible).
+2.  **On-chain**: The file's SHA-256 hash and metadata are anchored in a private Hyperledger Fabric network.
+3.  **Result**: 100% data integrity with verifiable history, without clogging the blockchain with large data payloads.
 
 ## 🏗 System Architecture
 
-The MVP currently simulates the entire lifecycle of a secure document:
+The project requires two parallel components running locally:
 
-1.  **Ingestion**: A 10MB dummy file (simulating a high-res map or scan) is generated.
-2.  **Hashing**: A unique SHA-256 fingerprint is calculated locally.
-3.  **Anchoring**: The hash is sent to the Ledger (currently mocked with network latency simulation).
-4.  **Storage**: The physical file is uploaded to the private MinIO cluster.
-5.  **Indexing**: Metadata is saved to the local database.
+1.  **The Application**: Go backend + MinIO + Postgres (Docker Compose).
+2.  **The Network**: Hyperledger Fabric Test Network (Peer Nodes + Orderer).
+
+```text
+[ Client App ]  --->  [ MinIO Storage (Docker) ]
+      |
+      +------------>  [ Fabric Gateway ]
+                            |
+                     [ Peer0.Org1 ] <---> [ Orderer ]
+```
 
 ## 🚀 Prerequisites
 
-Before running the project, ensure you have the following installed:
-
-*   **Go**: Version 1.21 or higher.
+*   **OS**: Linux (Ubuntu recommended) or WSL2 on Windows.
+*   **Go**: Version 1.21+.
 *   **Docker** & **Docker Compose**.
+*   **Curl** & **Git**.
 
-## 🛠 Quick Start
+## 🛠 Installation & Setup
 
-### 1. Clone the Repository
-```bash
-git clone https://github.com/your-username/military-audit-log.git
-cd military-audit-log
+### 1. Directory Structure Setup
+To ensure the hardcoded paths in the Go code work, we recommend this folder structure:
+
+```text
+~/code/
+  ├── military-audit-log/       # This repository
+  └── fabric-network/           # Hyperledger Fabric infrastructure
 ```
 
-### 2. Start Infrastructure
-We use Docker to spin up the local Object Storage (MinIO) and Database.
+### 2. Start Hyperledger Fabric Network
+If you haven't installed Fabric yet, run these commands:
 
 ```bash
+# Create infrastructure folder
+mkdir -p ~/code/fabric-network && cd ~/code/fabric-network
+
+# Download Fabric Docker images and binaries (Version 2.5.x)
+curl -sSLO https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh && chmod +x install-fabric.sh
+./install-fabric.sh --fabric-version 2.5.9 binary samples docker
+
+# Start the Network and Deploy Chaincode
+cd fabric-samples/test-network
+./network.sh down
+./network.sh up createChannel -c mychannel -ca
+./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go -ccl go
+```
+
+### 3. Start Application Infrastructure
+Go back to the project folder and start MinIO and Postgres.
+
+```bash
+cd ~/code/military-audit-log
 docker-compose -f deploy/docker-compose.yml up -d
 ```
-*Wait a few seconds for the containers to initialize.*
 
-### 3. Run the Application
-The application will generate test data, process it, and output performance metrics.
+## ⚡ Running the Benchmark
+
+The application is configured to run a performance benchmark (writing files to Storage + Blockchain sequentially).
 
 ```bash
-# Download dependencies
+# Install Go dependencies
 go mod tidy
 
-# Run the entry point
+# Run the full MVP
 go run cmd/main.go
 ```
 
-### 4. Expected Output
-You should see logs indicating the processing steps and performance benchmarks:
+### Expected Output
+You will see the latency of real consensus (typically ~2 seconds per block).
 
 ```text
-Starting Military Audit Log MVP...
-Created bucket: military-logs
-Generating 10MB dummy file...
-Processing document...
-Blockchain write latency: 200.83ms
--> [SQL] Saved metadata for: doc-176954...
-
-Success! Document saved to MinIO.
-Hash: e5b844cc57f57094ea4585e235f36c78...
-Total execution time (10MB file): 350.5ms
+🚀 Starting Benchmark for Research Paper...
+Running 10 iterations with 1048576 byte files...
+[1/10] Processing... Done in 2.1500s
+[2/10] Processing... Done in 2.0800s
+...
+✅ Benchmark finished! Data saved to 'benchmark_results.csv'
 ```
 
 ## 🔍 Verification
 
-You can verify that the actual file was securely stored by accessing the MinIO Console.
+### 1. Verify Off-chain Storage (MinIO)
+*   **URL**: [http://localhost:9001](http://localhost:9001)
+*   **User/Pass**: `admin` / `password123`
+*   **Bucket**: `military-logs` (You will see the actual binary files here).
 
-1.  Open your browser at **[http://localhost:9001](http://localhost:9001)**
-2.  Login with credentials:
-    *   **Username:** `admin`
-    *   **Password:** `password123`
-3.  Navigate to **Object Browser** -> **military-logs**.
-4.  You will see the uploaded `secret_map_10mb.pdf`.
+### 2. Verify On-chain Data (Fabric CLI)
+You can query the ledger directly from the Docker container to prove the data exists on the blockchain.
 
-## 📂 Project Structure
-
-```text
-.
-├── cmd/
-│   └── main.go           # Application entry point & simulation logic
-├── deploy/
-│   └── docker-compose.yml # Infrastructure definition (MinIO, Postgres)
-├── internal/
-│   ├── core/             # Core business logic (Service, Domain models)
-│   ├── ledger/           # Blockchain interface (Mock / Fabric adapter)
-│   ├── storage/          # Object storage implementation (MinIO SDK)
-│   └── db/               # Database interactions
-├── go.mod                # Go module definitions
-└── README.md             # Project documentation
+```bash
+docker exec cli peer chaincode query -C mychannel -n basic -c '{"Args":["QueryAssets", "{\"selector\":{\"docType\":\"asset\"}}"]}'
 ```
-
-## 🔮 Future Roadmap
-
-*   [ ] Integration with **Hyperledger Fabric** Test Network (replacing the Mock Ledger).
-*   [ ] Implementation of **CP-ABE** (Attribute-Based Encryption) for role-based access control.
-*   [ ] Performance benchmarking suite for scientific paper analysis.
+*You will see a JSON output containing your file hashes and timestamps.*
 
 ## 🔧 Troubleshooting
 
-*   **Error: `permission denied ... /var/run/docker.sock`**:
-    Run the command with `sudo` or add your user to the docker group: `sudo usermod -aG docker $USER`.
-*   **Error: `package ... is not in GOROOT`**:
-    Your Go version is too old. Please update to Go 1.21+.
+**Error: `crypto path does not exist`**
+*   The Go code cannot find the Fabric certificates.
+*   **Fix**: Open `internal/ledger/fabric.go` and adjust the `cryptoPath` variable to point to your `fabric-samples` directory.
+
+**Error: `rpc error: code = Unavailable`**
+*   The Fabric Gateway cannot reach the Peer node.
+*   **Fix**: Ensure the network is running (`docker ps` should show `peer0.org1.example.com`).
+
+**Error: `permission denied`**
+*   **Fix**: Run commands with `sudo` or add your user to the `docker` group.
 
 ---
 *Developed for Academic Research on Secure Distributed Systems.*
