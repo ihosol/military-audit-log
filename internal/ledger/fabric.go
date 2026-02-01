@@ -94,28 +94,51 @@ func NewFabricLedger() (*FabricLedger, error) {
 	}, nil
 }
 
-// Write записує хеш у блокчейн
-func (f *FabricLedger) Write(hash string, metadata string) (string, error) {
-	fmt.Println("--> Sending transaction to Hyperledger Fabric...")
-
-	// ВИПРАВЛЕННЯ:
-	// Стандартний контракт "basic" має таку структуру:
-	// CreateAsset(ID string, Color string, Size int, Owner string, AppraisedValue int)
-	
-	// Ми адаптуємо ці поля під наш журнал аудиту:
-	// 1. ID             -> hash (Унікальний хеш файлу)
-	// 2. Color          -> metadata (Тут ми збережемо "File: order.txt") - ЦЕ РЯДОК, ТУТ БЕЗПЕЧНО
-	// 3. Size           -> "1" (Просто розмір)
-	// 4. Owner          -> "System" (Хто записал)
-	// 5. AppraisedValue -> "0" (Має бути ЧИСЛОМ, тому передаємо "0", а не текст)
-
-	_, err := f.contract.SubmitTransaction("CreateAsset", hash, metadata, "1", "System", "0")
-	
+// Read читає метадані активу з блокчейну за його хешем
+func (f *FabricLedger) Read(hash string) (string, error) {
+	// EvaluateTransaction - це "легкий" запит (читання). 
+	// Він не створює блок і не вимагає консенсусу (швидко).
+	result, err := f.contract.EvaluateTransaction("ReadAsset", hash)
 	if err != nil {
-		return "", fmt.Errorf("failed to submit transaction: %w", err)
+		return "", fmt.Errorf("failed to read asset: %w", err)
+	}
+	return string(result), nil
+}
+
+// Write записує хеш, чекає підтвердження і повертає TxID
+func (f *FabricLedger) Write(hash string, metadata string) (string, error) {
+	// 1. Створюємо пропозицію (Proposal)
+	proposal, err := f.contract.NewProposal("CreateAsset", 
+		client.WithArguments(hash, metadata, "1", "System", "0"))
+	if err != nil {
+		return "", fmt.Errorf("failed to create proposal: %w", err)
 	}
 
-	return "tx_committed_verified", nil
+	// 2. Ендорсинг (Endorse)
+	transaction, err := proposal.Endorse()
+	if err != nil {
+		return "", fmt.Errorf("failed to endorse: %w", err)
+	}
+
+	// 3. Відправка (Submit)
+	commit, err := transaction.Submit()
+	if err != nil {
+		return "", fmt.Errorf("failed to submit: %w", err)
+	}
+
+	// 4. ОЧІКУВАННЯ (Status Check) - Саме це поверне затримку 2 сек
+	// Ця функція блокує виконання, поки пір не підтвердить запис блоку
+	status, err := commit.Status()
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit status: %w", err)
+	}
+
+	if !status.Successful {
+		return "", fmt.Errorf("transaction failed with status code: %d", status.Code)
+	}
+
+	// 5. Повертаємо ID
+	return transaction.TransactionID(), nil
 }
 
 func (f *FabricLedger) Close() {

@@ -2,85 +2,129 @@ package main
 
 import (
 	"audit-log/internal/core"
+	"audit-log/internal/db"
 	"audit-log/internal/ledger"
 	"audit-log/internal/storage"
 	"bytes"
 	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
+	"sync"
 	"time"
 )
 
-// DummyDB (залишаємо як є)
-type DummyDB struct{}
-func (d *DummyDB) Save(doc *core.Document) error { return nil }
-
 func main() {
-	fmt.Println("🚀 Starting Benchmark for Research Paper...")
+	// --- НАЛАШТУВАННЯ ЕКСПЕРИМЕНТУ ---
+	mode := flag.String("mode", "simple", "Mode: simple | bench | baseline")
+	workers := flag.Int("workers", 1, "Number of concurrent threads (goroutines)")
+	count := flag.Int("count", 10, "Total number of files to process")
+	flag.Parse()
 
-	// 1. Підключення
+	fmt.Printf("🔬 Starting Experiment: Mode=%s | Workers=%d | Files=%d\n", *mode, *workers, *count)
+
+	// 1. Ініціалізація інфраструктури
 	realStorage := storage.NewMinioStorage("localhost:9000", "admin", "password123", "military-logs")
-	realLedger, err := ledger.NewFabricLedger()
-	if err != nil {
-		log.Fatalf("❌ Failed to connect to Fabric: %v", err)
+	
+	// Підключаємося до Fabric (якщо не Baseline режим)
+	var realLedger core.Ledger
+	var err error
+	
+	if *mode == "baseline" {
+		fmt.Println("⚠️  BASELINE MODE: Blockchain Disabled")
+		realLedger = &ledger.MockLedger{} // Або nil, але краще мок, щоб не панікувало
+	} else {
+		realLedger, err = ledger.NewFabricLedger()
+		if err != nil {
+			log.Fatalf("❌ Fabric connection failed: %v", err)
+		}
 	}
-	defer realLedger.Close()
 
-	myDB := &DummyDB{}
-	service := core.NewAuditService(realStorage, realLedger, myDB)
-
-	// 2. Підготовка CSV файлу
-	file, err := os.Create("benchmark_results.csv")
+	// БД
+	realDB, err := db.NewPostgresDB("localhost", "user", "password", "audit_db", "5432")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("❌ Postgres connection failed: %v", err)
 	}
+
+	service := core.NewAuditService(realStorage, realLedger, realDB)
+
+	// 2. Підготовка CSV
+	filename := fmt.Sprintf("results_%s_w%d_c%d.csv", *mode, *workers, *count)
+	file, _ := os.Create(filename)
 	defer file.Close()
 	writer := csv.NewWriter(file)
+	writer.Write([]string{"RequestID", "Duration_Sec", "Status"})
 	defer writer.Flush()
 
-	// Заголовки CSV
-	writer.Write([]string{"Iteration", "FileSize_Bytes", "Latency_Seconds"})
+	// 3. ЗАПУСК ЕКСПЕРИМЕНТУ
+	results := make(chan string, *count)
+	var wg sync.WaitGroup
+	
+	startTime := time.Now()
 
-	// 3. ПАРАМЕТРИ ТЕСТУ
-	iterations := 10        // Скільки разів запускати (для статті постав 50-100)
-	fileSize := 1024 * 1024 // 1 МБ (можеш змінювати на 10 МБ)
+	// Канал завдань (Semaphore pattern for workers)
+	jobs := make(chan int, *count)
 
-	fmt.Printf("Running %d iterations with %d byte files...\n", iterations, fileSize)
+	// Запускаємо воркерів (Goroutines)
+	for w := 1; w <= *workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := range jobs {
+				// Генерація унікального файлу
+				size := 1 * 1024 * 1024 // 1 MB
+				content := make([]byte, size)
+				rand.Read(content[:1024]) // Випадковий заголовок (щоб хеш був різний)
+				
+				fName := fmt.Sprintf("req_%s_%d.bin", *mode, j)
+				
+				t0 := time.Now()
+				
+				// Виклик сервісу
+				// Якщо mode == baseline, передаємо false
+				useBC := (*mode != "baseline")
+				_, err := service.ProcessDocument(fName, bytes.NewReader(content), int64(size), useBC)
+				
+				dur := time.Since(t0).Seconds()
+				
+				status := "OK"
+				if err != nil {
+					status = "ERR"
+					fmt.Printf("Err: %v\n", err)
+				} else {
+					fmt.Printf("Worker %d: Job %d done in %.2fs\n", id, j, dur)
+				}
 
-	// 4. Цикл тестування
-	for i := 1; i <= iterations; i++ {
-		// Генерація даних: створюємо масив нулів
-		content := make([]byte, fileSize)
-		
-		// !!! ВАЖЛИВА ЗМІНА !!!
-		// Додаємо унікальні дані на початок файлу, щоб хеш завжди був різним
-		uniquePrefix := fmt.Sprintf("Iteration-%d-Time-%d", i, time.Now().UnixNano())
-		copy(content, []byte(uniquePrefix)) // Копіюємо унікальний рядок у початок масиву
-
-		reader := bytes.NewReader(content)
-		fileName := fmt.Sprintf("bench_file_%d.bin", i)
-
-		fmt.Printf("[%d/%d] Processing... ", i, iterations)
-		
-		start := time.Now()
-		
-		_, err := service.ProcessDocument(fileName, reader, int64(fileSize))
-		if err != nil {
-			log.Printf("Error: %v\n", err)
-			continue
-		}
-
-		duration := time.Since(start).Seconds()
-		fmt.Printf("Done in %.4fs\n", duration)
-
-		// Запис у CSV
-		writer.Write([]string{
-			fmt.Sprintf("%d", i),
-			fmt.Sprintf("%d", fileSize),
-			fmt.Sprintf("%.4f", duration),
-		})
+				// Запис результату в канал (CSV рядок)
+				results <- fmt.Sprintf("%d,%.4f,%s", j, dur, status)
+			}
+		}(w)
 	}
 
-	fmt.Println("✅ Benchmark finished! Data saved to 'benchmark_results.csv'")
+	// Наповнюємо чергу завдань
+	for j := 1; j <= *count; j++ {
+		jobs <- j
+	}
+	close(jobs)
+
+	// Чекаємо завершення
+	wg.Wait()
+	close(results)
+
+	totalTime := time.Since(startTime)
+
+	// Зберігаємо результати у файл
+	for r := range results {
+		var cols []string
+		fmt.Sscanf(r, "%s", &cols) // Спрощено, краще парсити кому
+		// Просто пишемо raw string у csv, розділяючи вручну для швидкості прикладу
+		file.WriteString(r + "\n")
+	}
+
+	fmt.Printf("\n✅ Experiment Finished!\n")
+	fmt.Printf("Total Time: %.2fs\n", totalTime.Seconds())
+	fmt.Printf("Throughput (TPS): %.2f req/sec\n", float64(*count)/totalTime.Seconds())
+	fmt.Printf("Data saved to: %s\n", filename)
 }

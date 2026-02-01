@@ -17,3 +17,8 @@ func (m *MockLedger) Write(hash string, metadata string) (string, error) {
 	dummyTx := sha256.Sum256([]byte(hash + time.Now().String()))
 	return "0x" + hex.EncodeToString(dummyTx[:]), nil
 }
+
+// Read - заглушка для MockLedger
+func (m *MockLedger) Read(hash string) (string, error) {
+	return "mock-metadata", nil
+}
