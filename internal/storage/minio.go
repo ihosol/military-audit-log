@@ -41,7 +41,7 @@ func NewMinioStorage(endpoint, accessKey, secretKey, bucket string) *MinioStorag
 
 func (s *MinioStorage) Upload(filename string, data io.Reader, size int64) (string, error) {
 	ctx := context.Background()
-	
+
 	// Завантаження потоку даних
 	info, err := s.client.PutObject(ctx, s.bucketName, filename, data, size, minio.PutObjectOptions{
 		ContentType: "application/pdf", // Можна змінювати динамічно

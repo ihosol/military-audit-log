@@ -96,7 +96,7 @@ func NewFabricLedger() (*FabricLedger, error) {
 
 // Read читає метадані активу з блокчейну за його хешем
 func (f *FabricLedger) Read(hash string) (string, error) {
-	// EvaluateTransaction - це "легкий" запит (читання). 
+	// EvaluateTransaction - це "легкий" запит (читання).
 	// Він не створює блок і не вимагає консенсусу (швидко).
 	result, err := f.contract.EvaluateTransaction("ReadAsset", hash)
 	if err != nil {
@@ -108,7 +108,7 @@ func (f *FabricLedger) Read(hash string) (string, error) {
 // Write записує хеш, чекає підтвердження і повертає TxID
 func (f *FabricLedger) Write(hash string, metadata string) (string, error) {
 	// 1. Створюємо пропозицію (Proposal)
-	proposal, err := f.contract.NewProposal("CreateAsset", 
+	proposal, err := f.contract.NewProposal("CreateAsset",
 		client.WithArguments(hash, metadata, "1", "System", "0"))
 	if err != nil {
 		return "", fmt.Errorf("failed to create proposal: %w", err)

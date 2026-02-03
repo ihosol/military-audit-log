@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-type MockLedger struct {}
+type MockLedger struct{}
 
 func NewMockLedger() *MockLedger {
 	return &MockLedger{}

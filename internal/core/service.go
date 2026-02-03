@@ -4,17 +4,24 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"time"
+	"io"
+	"bytes"
+
 )
 
 type Document struct {
-	ID            string
-	Filename      string
-	FileHash      string
-	StoragePath   string
-	BlockchainTxID string
-	CreatedAt     time.Time
+	ID          string
+	StoragePath string
+	HashHex     string
+	TxID        string
+
+	// Merkle batching
+	MerkleRoot      string
+	MerkleLeafIndex int
+	MerkleBatchSize int
+
+	CreatedAt time.Time
 }
 
 type ObjectStorage interface {
@@ -24,94 +31,133 @@ type ObjectStorage interface {
 type Ledger interface {
 	Write(hash string, metadata string) (txID string, err error)
 	Read(hash string) (metadata string, err error)
-
 }
 
 type Database interface {
 	Save(doc *Document) error
-	Get(id string) (*Document, error) 
+	Get(id string) (*Document, error)
 }
 
 type AuditService struct {
-	storage ObjectStorage
-	ledger  Ledger
-	db      Database
+	store  ObjectStorage
+	db     Database
+	ledger Ledger
+
+	useBC  bool
+	merkle *MerkleBatcher
 }
 
-func NewAuditService(s ObjectStorage, l Ledger, d Database) *AuditService {
-	return &AuditService{storage: s, ledger: l, db: d}
+func NewAuditService(store ObjectStorage, db Database, ledger Ledger, useBC bool) *AuditService {
+	return &AuditService{store: store, db: db, ledger: ledger, useBC: useBC}
 }
 
-// ProcessDocument тепер приймає useBlockchain (для Baseline тесту)
-func (s *AuditService) ProcessDocument(filename string, data io.ReadSeeker, size int64, useBlockchain bool) (*Document, error) {
-	// 1. Хешування
-	hashCalculator := sha256.New()
-	if _, err := io.Copy(hashCalculator, data); err != nil {
-		return nil, fmt.Errorf("hashing error: %v", err)
-	}
-	fileHash := hex.EncodeToString(hashCalculator.Sum(nil))
-	data.Seek(0, 0) // Скидаємо рідер на початок
+func (s *AuditService) EnableMerkleBatching(batcher *MerkleBatcher) {
+	s.merkle = batcher
+}
 
-	// 2. Блокчейн (Тільки якщо увімкнено!)
-	var txID string
-	var err error
-	
-	if useBlockchain {
-		// Тут буде затримка 2с
-		txID, err = s.ledger.Write(fileHash, fmt.Sprintf("File: %s", filename))
-		if err != nil {
-			return nil, fmt.Errorf("blockchain write error: %v", err)
-		}
-	} else {
-		// Baseline режим: імітуємо, що блокчейну немає (0 затримки)
-		txID = "skipped-baseline-mode"
-	}
+// ProcessDocument stores the raw content in object storage, stores metadata in DB, and (optionally)
+// commits either the document hash (direct) or a merkle root (batched) to the ledger.
+//
+// It returns a Document, fine-grained DocumentMetrics, and an error (if any).
+func (s *AuditService) ProcessDocument(content []byte) (*Document, *DocumentMetrics, error) {
+	m := &DocumentMetrics{}
+	reqStart := time.Now()
+	m.ReqStartUnixNS = reqStart.UnixNano()
 
-	// 3. MinIO
-	path, err := s.storage.Upload(filename, data, size)
-	if err != nil {
-		return nil, fmt.Errorf("storage upload error: %v", err)
-	}
-
-	// 4. Postgres
 	doc := &Document{
-		ID:             fmt.Sprintf("doc-%d-%s", time.Now().UnixNano(), fileHash[:8]),
-		Filename:       filename,
-		FileHash:       fileHash,
-		StoragePath:    path,
-		BlockchainTxID: txID,
-		CreatedAt:      time.Now(),
+		ID:        fmt.Sprintf("doc-%d", time.Now().UnixNano()),
+		CreatedAt: time.Now(),
 	}
 
+	// --- Hash ---
+	h0 := time.Now()
+	m.HashStartUnixNS = h0.UnixNano()
+	sum := sha256.Sum256(content)
+	rawHash := sum[:]
+	doc.HashHex = hex.EncodeToString(rawHash)
+	h1 := time.Now()
+	m.HashEndUnixNS = h1.UnixNano()
+	m.HashSec = h1.Sub(h0).Seconds()
+
+	// --- Object storage ---
+	s0 := time.Now()
+	m.StorageStartUnixNS = s0.UnixNano()
+	path := fmt.Sprintf("%s.bin", doc.ID)
+	path, err := s.store.Upload(path,  bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		m.ReqEndUnixNS = time.Now().UnixNano()
+		m.TotalSec = time.Since(reqStart).Seconds()
+		return nil, m, err
+	}
+	m.StorageEndUnixNS = time.Now().UnixNano()
+	m.StorageSec = time.Duration(m.StorageEndUnixNS - m.StorageStartUnixNS).Seconds()
+	doc.StoragePath = path
+
+	// --- DB ---
+	d0 := time.Now()
+	m.DBStartUnixNS = d0.UnixNano()
 	if err := s.db.Save(doc); err != nil {
-		return nil, fmt.Errorf("db save error: %v", err)
+		m.DBEndUnixNS = time.Now().UnixNano()
+		m.DBSec = time.Duration(m.DBEndUnixNS - m.DBStartUnixNS).Seconds()
+		m.ReqEndUnixNS = time.Now().UnixNano()
+		m.TotalSec = time.Since(reqStart).Seconds()
+		return nil, m, err
+	}
+	m.DBEndUnixNS = time.Now().UnixNano()
+	m.DBSec = time.Duration(m.DBEndUnixNS - m.DBStartUnixNS).Seconds()
+
+	if s.useBC {
+		if s.merkle != nil {
+			// --- Merkle batch enqueue + wait ---
+			m.MerkleEnqueueUnixNS = time.Now().UnixNano()
+			res, err := s.merkle.Add(rawHash)
+			if err != nil {
+				m.ReqEndUnixNS = time.Now().UnixNano()
+				m.TotalSec = time.Since(reqStart).Seconds()
+				return nil, m, err
+			}
+			doc.MerkleRoot = res.Root
+			doc.MerkleLeafIndex = res.Index
+			doc.MerkleBatchSize = res.BatchSize
+			doc.TxID = res.TxID
+
+			// propagate timings from batcher
+			m.MerkleFlushStartUnixNS = res.FlushStartUnixNS
+			m.MerkleBuildStartUnixNS = res.BuildStartUnixNS
+			m.MerkleBuildEndUnixNS = res.BuildEndUnixNS
+			m.MerkleLedgerStartUnixNS = res.LedgerStartUnixNS
+			m.MerkleLedgerEndUnixNS = res.LedgerEndUnixNS
+			m.MerkleResponseUnixNS = res.ResponseUnixNS
+
+			m.MerkleLeafIndex = res.Index
+			m.MerkleBatchSize = res.BatchSize
+
+			if m.MerkleResponseUnixNS > 0 && res.EnqueueUnixNS > 0 {
+				m.MerkleWaitSec = time.Duration(m.MerkleResponseUnixNS - res.EnqueueUnixNS).Seconds()
+			}
+			if m.MerkleBuildEndUnixNS > 0 && m.MerkleBuildStartUnixNS > 0 {
+				m.MerkleBuildSec = time.Duration(m.MerkleBuildEndUnixNS - m.MerkleBuildStartUnixNS).Seconds()
+			}
+			if m.MerkleLedgerEndUnixNS > 0 && m.MerkleLedgerStartUnixNS > 0 {
+				m.MerkleLedgerSec = time.Duration(m.MerkleLedgerEndUnixNS - m.MerkleLedgerStartUnixNS).Seconds()
+			}
+		} else {
+			// --- Direct ledger write ---
+			l0 := time.Now()
+			m.LedgerStartUnixNS = l0.UnixNano()
+			txID, err := s.ledger.Write(doc.HashHex, "")
+			m.LedgerEndUnixNS = time.Now().UnixNano()
+			m.LedgerSec = time.Duration(m.LedgerEndUnixNS - m.LedgerStartUnixNS).Seconds()
+			if err != nil {
+				m.ReqEndUnixNS = time.Now().UnixNano()
+				m.TotalSec = time.Since(reqStart).Seconds()
+				return nil, m, err
+			}
+			doc.TxID = txID
+		}
 	}
 
-	return doc, nil
-}
-
-// VerifyDocument - НОВИЙ МЕТОД ДЛЯ АУДИТОРА
-func (s *AuditService) VerifyDocument(docID string) (bool, string, error) {
-	// А. Отримуємо запис з БД
-	doc, err := s.db.Get(docID) // Тобі треба додати Get в інтерфейс DB і в postgres.go!
-	if err != nil {
-		return false, "Database missing", err
-	}
-
-	// Б. Качаємо файл з MinIO (треба додати Download в інтерфейс Storage і minio.go!)
-	// Для MVP спростимо: припустимо, ми перевіряємо тільки хеш у блокчейні по запису з БД
-	
-	// В. Читаємо з Блокчейну
-	ledgerData, err := s.ledger.Read(doc.FileHash)
-	if err != nil {
-		return false, "Blockchain missing", fmt.Errorf("hash not found in ledger: %v", err)
-	}
-
-	// Г. Звірка
-	// У реальності тут ми б ще перехешували файл з MinIO, але для статті достатньо факту наявності
-	if ledgerData != "" {
-		return true, "Valid Integrity", nil
-	}
-
-	return false, "Invalid", nil
+	m.ReqEndUnixNS = time.Now().UnixNano()
+	m.TotalSec = time.Since(reqStart).Seconds()
+	return doc, m, nil
 }

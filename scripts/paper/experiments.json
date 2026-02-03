@@ -1,0 +1,64 @@
+{
+  "go_cmd": ["go", "run", "cmd/main.go"],
+  "common": {
+    "count": 2000,
+    "warmup": 10,
+    "sizes": "4096,65536,1048576,5242880"
+  },
+  "repeats": 3,
+  "experiments": [
+    {
+      "name": "baseline_w1_mix",
+      "args": ["-mode", "baseline", "-workers", "1"]
+    },
+    {
+      "name": "baseline_w4_mix",
+      "args": ["-mode", "baseline", "-workers", "4"]
+    },
+    {
+      "name": "baseline_w8_mix",
+      "args": ["-mode", "baseline", "-workers", "8"]
+    },
+
+    {
+      "name": "bench_w1_mix",
+      "args": ["-mode", "bench", "-workers", "1"],
+      "overrides": {
+        "count": 200,
+        "warmup": 10,
+        "sizes": "4096,65536,1048576,5242880"
+      }
+    },
+    {
+      "name": "bench_w4_mix",
+      "args": ["-mode", "bench", "-workers", "4"]
+    },
+    {
+      "name": "bench_w8_mix",
+      "args": ["-mode", "bench", "-workers", "8"]
+    },
+
+    {
+      "name": "bench_merkle_b32_w50_w8_mix",
+      "args": ["-mode", "bench", "-workers", "8", "-merkle", "-merkle-batch", "32", "-merkle-wait-ms", "50"]
+    },
+    {
+      "name": "bench_merkle_b128_w50_w8_mix",
+      "args": ["-mode", "bench", "-workers", "8", "-merkle", "-merkle-batch", "128", "-merkle-wait-ms", "50"]
+    },
+    {
+      "name": "bench_merkle_b512_w50_w8_mix",
+      "args": ["-mode", "bench", "-workers", "8", "-merkle", "-merkle-batch", "512", "-merkle-wait-ms", "50"]
+    },
+
+    {
+      "name": "bench_merkle_lowload_b128_w200_w1_4kb",
+      "args": ["-mode", "bench", "-workers", "1", "-merkle", "-merkle-batch", "128", "-merkle-wait-ms", "200"],
+      "overrides": {
+        "count": 64,
+        "warmup": 0,
+        "sizes": "4096"
+      }
+    }
+  ]
+}
